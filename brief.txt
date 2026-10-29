@@ -1,0 +1,9 @@
+4 layes
+
+UI = ui show and navigation (pages folder, components folder)
+
+hook layer = state & api managing (Hooks folder)
+
+State layer = storing data (auth.context.jsx, post.context.jsx)
+
+API layer = frontend communicate with backend (services/auth.api.js)
