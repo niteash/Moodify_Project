@@ -1,13 +1,20 @@
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
-export const init = async ({ landmarkerRef, videoRef, streamRef }) => {
+export const init = async ({
+  landmarkerRef,
+  videoRef,
+  streamRef,
+  setExpression,
+}) => {
   try {
-    // Load MediaPipe Vision
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Camera access is unavailable. Use localhost or HTTPS.");
+    }
+
     const vision = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm",
     );
 
-    // Create Face Landmarker
     landmarkerRef.current = await FaceLandmarker.createFromOptions(vision, {
       baseOptions: {
         modelAssetPath:
@@ -18,9 +25,6 @@ export const init = async ({ landmarkerRef, videoRef, streamRef }) => {
       numFaces: 1,
     });
 
-    console.log("Face Landmarker loaded");
-
-    // Request camera
     streamRef.current = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: "user",
@@ -30,76 +34,142 @@ export const init = async ({ landmarkerRef, videoRef, streamRef }) => {
       audio: false,
     });
 
-    console.log("Camera permission granted");
-
-    // Connect camera to video
-    if (videoRef.current) {
-      videoRef.current.srcObject = streamRef.current;
-      await videoRef.current.play();
+    if (!videoRef.current) {
+      throw new Error("Video element is unavailable.");
     }
+
+    videoRef.current.srcObject = streamRef.current;
+    await videoRef.current.play();
+
+    setExpression?.("Camera ready. Click Detect Expression.");
+    console.log("Face Landmarker and camera initialized successfully.");
   } catch (error) {
     console.error("Face Expression Error:", error);
 
-    if (error.name === "NotReadableError") {
-      setExpression("Camera is already in use");
-    } else if (error.name === "NotAllowedError") {
-      setExpression("Camera permission denied");
-    } else if (error.name === "NotFoundError") {
-      setExpression("No camera found");
-    } else {
-      setExpression("Camera initialization failed");
+    if (landmarkerRef.current) {
+      landmarkerRef.current.close();
+      landmarkerRef.current = null;
     }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    const messages = {
+      NotAllowedError:
+        "Camera permission denied. Allow camera access in browser settings.",
+      NotFoundError: "No camera found on this device.",
+      NotReadableError: "Camera is already in use by another application.",
+      OverconstrainedError:
+        "The camera does not support the requested settings.",
+      SecurityError: "Camera access is blocked by browser security settings.",
+    };
+
+    setExpression?.(
+      messages[error.name] || error.message || "Camera initialization failed.",
+    );
+
+    throw error;
   }
 };
 
-export const detect = ({ landmarkerRef, videoRef, setExpression }) => {
+export const detect = ({
+  landmarkerRef,
+  videoRef,
+  setExpression,
+  onExpressionDetected,
+  animationRef,
+}) => {
   if (!landmarkerRef.current || !videoRef.current) {
+    setExpression?.("Camera or face detector is not ready.");
     return;
   }
 
   const video = videoRef.current;
 
-  // Wait until video has actual frames
-  if (video.readyState < 2) {
-    animationRef.current = requestAnimationFrame(detect);
+  if (video.readyState < 2 || video.videoWidth === 0) {
+    setExpression?.("Waiting for camera frames...");
+
+    animationRef.current = requestAnimationFrame(() =>
+      detect({
+        landmarkerRef,
+        videoRef,
+        setExpression,
+        onExpressionDetected,
+        animationRef,
+      }),
+    );
+
     return;
   }
 
-  const results = landmarkerRef.current.detectForVideo(
-    video,
-    performance.now(),
-  );
+  try {
+    const results = landmarkerRef.current.detectForVideo(
+      video,
+      performance.now(),
+    );
 
-  if (results.faceBlendshapes?.length > 0) {
-    const blendshapes = results.faceBlendshapes[0].categories;
+    if (results.faceBlendshapes?.length > 0) {
+      const blendshapes = results.faceBlendshapes[0].categories;
 
-    const getScore = (name) =>
-      blendshapes.find((b) => b.categoryName === name)?.score || 0;
+      const getScore = (name) =>
+        blendshapes.find((item) => item.categoryName === name)?.score ?? 0;
 
-    const smileLeft = getScore("mouthSmileLeft");
-    const smileRight = getScore("mouthSmileRight");
+      const smileLeft = getScore("mouthSmileLeft");
+      const smileRight = getScore("mouthSmileRight");
+      const jawOpen = getScore("jawOpen");
+      const browUp = getScore("browInnerUp");
+      const frownLeft = getScore("mouthFrownLeft");
+      const frownRight = getScore("mouthFrownRight");
+      const browDownLeft = getScore("browDownLeft");
+      const browDownRight = getScore("browDownRight");
 
-    const jawOpen = getScore("jawOpen");
-    const browUp = getScore("browInnerUp");
+      let currentExpression = "Neutral";
 
-    const frownLeft = getScore("mouthFrownLeft");
-    const frownRight = getScore("mouthFrownRight");
+      if (smileLeft > 0.3 && smileRight > 0.3) {
+        currentExpression = "happy";
+      } else if (jawOpen > 0.4 && browUp > 0.3) {
+        currentExpression = "surprised";
+      } else if (
+        browDownLeft > 0.25 &&
+        browDownRight > 0.25 &&
+        frownLeft > 0.1 &&
+        frownRight > 0.1
+      ) {
+        currentExpression = "angry";
+      } else if (
+        frownLeft > 0.15 &&
+        frownRight > 0.15 &&
+        smileLeft < 0.15 &&
+        smileRight < 0.15
+      ) {
+        currentExpression = "sad";
+      }
 
-    let currentExpression = "Neutral";
-    if (smileLeft > 0.3 && smileRight > 0.2) {
-      currentExpression = "Happy 😄";
-    } else if (jawOpen > 0.4 && browUp > 0.3) {
-      currentExpression = "Surprised 😲";
-    } else if (
-      frownLeft > 0.15 &&
-      frownRight > 0.15 &&
-      smileLeft < 0.15 &&
-      smileRight < 0.15
-    ) {
-      currentExpression = "Sad 😢";
+      setExpression?.(currentExpression);
+      onExpressionDetected?.(currentExpression);
+    } else {
+      setExpression?.("No face detected");
+      onExpressionDetected?.("No face detected");
     }
-    setExpression(currentExpression);
+  } catch (error) {
+    console.error("Expression detection error:", error);
+    setExpression?.("Expression detection failed.");
+    return;
   }
 
-  animationRef.current = requestAnimationFrame(detect);
+  animationRef.current = requestAnimationFrame(() =>
+    detect({
+      landmarkerRef,
+      videoRef,
+      setExpression,
+      onExpressionDetected,
+      animationRef,
+    }),
+  );
 };
